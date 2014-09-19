@@ -1,0 +1,209 @@
+---
+title: "Human Activity Recognition - selecting a Classifier for Activity Correctness"
+author: "Prabha Pillay"
+date: "16 September 2014"
+output: html_document
+---
+```{r setup, include=FALSE}
+library(knitr)
+options(digits = 2)
+```
+
+###Overview
+This project pertains to the field of study is known as Human Activity Recognition and concerns the quantification of correctness of activity. More specifically, accelerometer data was obtained from six participants, each performing Unilateral Dumbbell Biceps Curls five different ways - one correct and four incorrect. The dataset was supplied by the Groupware@LES research group (http://groupware.les.inf.puc-rio.br/har).
+  
+The goal was to derive a prediction model that could be applied to out-of-sample test data.
+  
+###Exploratory Data Analysis
+  
+The initial dataset comprised 19622 rows of 160 variables. Visual inspection showed many columns to be blank or contain NA values.
+
+```{r echo=FALSE, message=FALSE}
+library(caret) 
+set.seed(3243)
+```
+```{r message=FALSE}
+# read in training data, setting empty cells to NA
+training <- read.csv("./pml-training.csv",na.strings=c("NA",""))
+```  
+
+###Data Cleanup
+
+Removing columns that were more than 97% blank or NA reduced the number of columns to 60
+```{r message=FALSE}
+# establish which columns comprise more than 97% NA values and remove them
+na_count <- colSums(is.na(training))
+mostly_na <- na_count[na_count>0.97*nrow(training)]
+training2 <- training[,-which(names(training) %in% names(mostly_na))]
+  
+# convert two non-numeric columns to factors
+training2$user_name <- as.factor(training2$user_name)
+training2$classe <- as.factor(training2$classe)
+```
+Near-zero-variance analysis identified another column for removal ("new_window").
+```{r message=FALSE}  
+#look for columns with very little variance
+nsv <- nearZeroVar(training2,saveMetrics=TRUE)
+nsv[nsv$nzv==TRUE,]
+```
+This and three timestamp columns and a X index were also removed, having been judged to not contribute to the outcome.
+```{r message=FALSE}
+#remove the column identified above, along with the timestamp columns and X index
+columns_to_go <- c(-1,-3,-4,-5,-6)
+training3 <- (training2[columns_to_go])
+```
+Interestingly, analysis with the timestamp columns left in actually revealed two of them to be the best predictors of outcome. It is hypothesised that this may be because the sequence of exercises were performed in a fixed order. Given that the true objective of the study was the analysis of biometric activity monitor data, the timestamps were judged to be confounders and removed.
+
+###Data Partitioning
+
+The test dataset is so small (20 rows) that it cannot be used to estimate the out of sample error: cross-validation is the only option.  For this reason, a cross-validation set is partitioned from the original training data and used to estimate the error from a suitable fitted model.
+
+Given the size of the dataset, a 60:40 ratio was chosen.
+```{r message=FALSE}
+# partition the data into training and cross-validation sets
+inTrain <- createDataPartition(y=training3$classe,p=0.6,list=FALSE)
+training4 <- training3[inTrain,]
+cv4 <- training3[-inTrain,]
+```
+
+```{r}
+par(mfrow = c(1,2))
+qplot(roll_belt,num_window,colour=user_name,data=training4)
+qplot(roll_belt,num_window,colour=classe,data=training4)
+```
+
+These two plots show two of the predictors plotted against each other, coloured by user name in the first instance, and by class outcome in the second. There are several foci for each class value, but they tend to be well defined. A sophisticated training machine may be able to learn demarcations for them.
+
+###Training Run 1
+
+Linear Discriminant Analysis was the first training method chosen.
+```{r message=FALSE}
+# run LDA training
+bootControl <- trainControl(number = 200)
+modFit <- train(classe ~ .,data=training4,method="lda",trControl=bootControl,verbose=F)
+```
+The derived LDA model was used to generate predictions for the cross-validation set, which were then compared to the actual values.
+```{r message=FALSE}
+pred_cv <- predict(modFit,cv4)
+cfm1 <- confusionMatrix(pred_cv, cv4$classe)
+cfm1
+```
+
+###Training Run 2
+
+The exercise was repeated - this time, using a Gradient Boosting Classifier as the training method.
+```{r message=FALSE}
+# run GBM training
+modFit2 <- train(classe ~ ., data=training4, method="gbm",verbose=F)
+```
+```{r message=FALSE}
+# use the derived GBM model to generate predictions for the cross-validation set,
+# and then compare with the actual values  
+pred_cv2 <- predict(modFit2,cv4)
+cfm2 <- confusionMatrix(pred_cv2, cv4$classe)
+pred_train2 <- predict(modFit2,training4)
+cfm2t <- confusionMatrix(pred_train2, training4$classe)
+cfm2
+```
+The accuracy was much improved over the LDA approach (`r cfm2$overall['Accuracy']*100`% up from `r cfm1$overall['Accuracy']*100`%).
+```{r message=FALSE}
+# plot the model
+#plot(modFit2)
+```
+
+###Data Pre-Processing
+
+Another approach was now tried. A pre-processing step was undertaken, whereby Principal Component Analysis was applied to the numeric columns on the training dataset. This step also applied a scaling and centering process to the predictors to standardize them.
+```{r message=FALSE}
+# for a third option, apply PCA to the numeric columns of the training set
+# to reduce the number of predictors
+nums2 <- sapply(training4, is.numeric) 
+preProcTransformation <- preProcess(training4[,nums2], method = "pca", thresh = 0.95)
+trainPC <- predict(preProcTransformation,training4[,nums2])
+dim(trainPC)
+```
+95% of the variance of 53 numeric columns could be expressed with 27 Principal Components.
+The non-numeric columns were recombined, and the generated pre-processing transformation was also applied to the cross-validation set.
+```{r message=FALSE}
+# Re-combine with the two non-numeric columns
+training5 <- cbind(trainPC,training4[,!nums2])
+  
+# Apply the training pre-processing transformation to the cross-validation set
+# to derive the same Principal Components
+cvPC <- predict(preProcTransformation,cv4[,nums2])
+# Recombine with the non-numeric columns
+cv5 <- cbind(cvPC,cv4[,!nums2])
+```
+```{r}
+par(mfrow = c(1,2))
+qplot(PC1,PC2,colour=user_name,data=training5)
+qplot(PC1,PC2,colour=classe,data=training5)
+```
+
+These two plots show the two most signficant principal components plotted against each other, coloured by user name in the first instance, and by class outcome in the second. The first plot shows clear aggregation by user, suggesting that some standardization of data parameters between users would be a useful pre-processing exercise.
+
+
+###Training Run 3
+
+The same two methods of LDA and GBM were applied to the pre-processed training set to generate two new models. These were applied in turn to the pre-processed cross-validation set, and the predictions were compared with the actual values.
+
+```{r message=FALSE}
+# run LDA training on the principal components
+modFit3 <- train(classe ~ .,data=training5,method="lda",trControl=bootControl,verbose=F)
+```
+```{r message=FALSE}
+# use the derived LDA model to generate predictions for the cross-validation set,
+# and then compare with the actual values  
+pred_cv3 <- predict(modFit3,cv5)
+cfm3 <- confusionMatrix(pred_cv3, cv5$classe)
+cfm3
+```
+###Training Run 4
+
+```{r message=FALSE}
+# run GBM training on the principal components
+modFit4 <- train(classe ~ ., data=training5, method="gbm",verbose=F)
+```
+```{r message=FALSE}  
+# use the derived GBM model to generate predictions for the cross-validation set,
+# and then compare with the actual values  
+pred_cv4 <- predict(modFit4,cv5)
+cfm4 <- confusionMatrix(pred_cv4, cv5$classe)
+cfm4
+```
+
+###Classifier Comparison
+
+The pre-processing step of transforming the number of predictors to a smaller number of Principal Components seemed to have a detrimental effect on the accuracy outcomes. In the case of the GBM training method, accuracy regressed from `r cfm2$overall['Accuracy']*100`% to `r cfm4$overall['Accuracy']*100`%.
+
+The lower performance of the LDA classifier indicates that a linear solution cannot be derived for this data set. A key requirment for good performance is that the predictors are normally distributed. This may not be the case.
+
+Our best model is therefore the GBM training method, applied to the predictors without a PCA pre-processing step. 
+
+The expected out of sample error is given by (1 - model accuracy) or `r (1-cfm2$overall['Accuracy'])*100`%. This is comparable to the in-sample error of `r (1-cfm2t$overall['Accuracy'])*100`%, suggesting that overfitting is not an issue with the chosen model.
+
+### Test Data Preparation
+
+The test data is now loaded and the same cleanup applied. 
+```{r message=FALSE}
+# load the test data, and 
+# remove the same NA, low-variance and redundant columns as for the training data
+testing <- read.csv(".//pml-testing.csv",na.strings=c("NA","","#DIV/0!"))
+testing2 <- testing[,-which(names(testing) %in% names(mostly_na))]
+testing3 <- (testing2[columns_to_go])
+testing3$user_name <- as.factor(testing3$user_name)
+```
+
+###Generating Test Data Predictions
+
+The most successful model, modFit2, is then applied to the test data to generate a set of predicted outcomes.
+```{r message=FALSE}
+# apply our most successful model, as indicated by the cross-validation check,
+# to the test data
+pred_test <- predict(modFit2,testing3)
+```
+The twenty generated predictions were submitted for the second part of the project using the supplied code, and a 100% score was achieved. A zero error rate is consistent with the very low value of the expected out of sample error.
+
+###Conclusion
+
+Two different classifiers were applied, with and without a PCA pre-processing step to the problem of classifiying correctness of a specific activity. The best of the four approaches had a very low out of sample error when applied to both a validation dataset and a smaller test dataset. Given the noted variety of inputs from a range of test subjects, it displays a promising level of robustness.
